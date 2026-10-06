@@ -1,0 +1,2 @@
+oifname "docker0" ct status dnat counter accept comment "!fw4: Docker published ports from LAN"
+oifname "br-*" ct status dnat counter accept comment "!fw4: Docker published ports from LAN"

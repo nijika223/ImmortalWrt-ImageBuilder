@@ -1,0 +1,121 @@
+name: Build ImmortalWrt x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 指定版本，留空选择默认值
+        type: string
+        required: false
+        default: ''
+      image_mode:
+        description: 镜像类型
+        type: choice
+        default: ext4-efi
+        options:
+          - ext4-efi
+          - all
+      rootfs_size:
+        description: RootFS 分区大小 (MiB)
+        type: string
+        default: '2000'
+      release:
+        description: 同时发布到 GitHub Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE_MODE: ${{ inputs.image_mode }}
+      ROOTFS_SIZE: ${{ inputs.rootfs_size }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install ImageBuilder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libncurses-dev \
+            zlib1g-dev gawk git gettext libssl-dev xsltproc rsync curl unzip \
+            python3 python3-setuptools zstd file wget openssl \
+            qemu-utils genisoimage dosfstools mtools
+
+      - name: Setup build variables
+        run: |
+          source config/build.conf
+
+          VERSION=${VERSION:-$(curl -fsSL --retry 3 "$DOWNLOAD_BASE/releases/" |
+            sed -nE "s/.*href=\"(${RELEASE_SERIES//./\\.}\\.[0-9]+)\/\".*/\\1/p" |
+            sort -Vu | tail -n 1)}
+          [[ -n $VERSION ]]
+
+          BUILDER_DIR="$RUNNER_TEMP/immortalwrt-imagebuilder-$VERSION-x86-64.Linux-x86_64"
+          FILES="$BUILDER_DIR/files"
+          for name in DOWNLOAD_BASE RELEASE_SERIES VERSION IMAGE_MODE ROOTFS_SIZE PROFILE BUILDER_DIR FILES; do
+            echo "$name=${!name}" >> "$GITHUB_ENV"
+          done
+
+      - name: Download ImageBuilder
+        run: |
+          archive="immortalwrt-imagebuilder-$VERSION-x86-64.Linux-x86_64.tar.zst"
+          curl -fL --retry 3 --connect-timeout 15 \
+            "$DOWNLOAD_BASE/releases/$VERSION/targets/x86/64/$archive" |
+            tar --zstd -x -C "$RUNNER_TEMP"
+          cp -a build.sh scripts files "$BUILDER_DIR/"
+
+      - name: Run custom scripts
+        working-directory: ${{ env.BUILDER_DIR }}
+        run: |
+          chmod 0755 files/etc/uci-defaults/99-custom files/etc/uci-defaults/menu
+          chmod 0755 files/etc/uci-defaults/91-docker-storage files/usr/libexec/docker-storage
+          chmod 0755 files/etc/init.d/docker-storage
+          bash scripts/target.sh
+          bash scripts/nikki.sh
+          bash scripts/mihomo.sh
+          bash scripts/qbittorrentee.sh
+          bash scripts/zsh.sh
+
+      - name: Build firmware
+        working-directory: ${{ env.BUILDER_DIR }}
+        run: bash build.sh
+
+      - name: Upload images and build records
+        uses: actions/upload-artifact@v7
+        with:
+          name: immortalwrt-${{ env.VERSION }}-x86_64-${{ env.IMAGE_MODE }}-${{ github.run_id }}
+          path: ${{ env.BUILDER_DIR }}/bin/targets/x86/64/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          tag="immortalwrt-${VERSION}-${IMAGE_MODE}-${RUN_NUMBER}-${RUN_ATTEMPT}"
+          gh release create "$tag" "$BUILDER_DIR/bin/targets/x86/64/"* \
+            --target "$COMMIT_SHA" --title "ImmortalWrt ${VERSION} ${IMAGE_MODE}" \
+            --notes "x86/64 generic, RootFS ${ROOTFS_SIZE} MiB"

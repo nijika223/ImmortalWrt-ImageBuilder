@@ -1,0 +1,142 @@
+#!/bin/sh
+# 整理已安装插件的菜单，保留默认名称、权限和旧链接。
+/usr/bin/lua <<'LUA'
+local fs = require("nixio.fs")
+local json = require("luci.jsonc")
+local menu_dir = "/usr/share/luci/menu.d/"
+local controller_dir = "/usr/lib/lua/luci/controller/"
+local compat_file = menu_dir .. "luci-custom-menu-compat.json"
+local compat = json.parse(fs.readfile(compat_file) or "{}")
+
+local rules = {
+    { "admin/services/dockerman", "admin/services/dockerman", 10 },
+    { "admin/services/eqos", "admin/services/eqos", 20 },
+    { "admin/nas/p910nd", "admin/services/p910nd", 30 },
+    { "admin/services/qbittorrent", "admin/nas/qbittorrent", 10, "qBittorrentEE" },
+    { "admin/nas/aria2", "admin/nas/aria2", 20 },
+    { "admin/services/openlist", "admin/nas/openlist", 30 },
+    { "admin/services/filebrowser", "admin/nas/filebrowser", 40 },
+    { "admin/nas/samba4", "admin/nas/samba4", 50, "Samba网络共享" },
+    { "admin/nas/vsftpd", "admin/nas/vsftpd", 60 },
+    { "admin/services/nikki", "admin/vpn/nikki", 10 },
+    { "admin/vpn/zerotier", "admin/vpn/zerotier", 20 },
+    { "admin/services/frpc", "admin/vpn/frpc", 30 }
+}
+
+local function relocate(path)
+    for _, rule in ipairs(rules) do
+        if path == rule[1] or path:sub(1, #rule[1] + 1) == rule[1] .. "/" then
+            return rule[2] .. path:sub(#rule[1] + 1)
+        end
+    end
+    return path
+end
+
+local function add_alias(old_path, new_path)
+    -- 通配别名保留旧书签、状态接口及带参数的子页面。
+    local key = old_path .. "/*"
+    if compat[key] and compat[key].action.type == "alias" and compat[key].action.path == new_path then
+        return
+    end
+    compat[key] = {
+        action = { type = "alias", path = new_path },
+        firstchild_ineligible = true
+    }
+    -- 先保存别名，避免后续写入失败后重试丢失旧路径。
+    assert(fs.writefile(compat_file, json.stringify(compat, true) .. "\n"))
+end
+
+for file in fs.glob(menu_dir .. "*.json") do
+    if file ~= compat_file then
+        local source = assert(json.parse(assert(fs.readfile(file))), file)
+        local result = {}
+        local changed = false
+        for path, spec in pairs(source) do
+            local target = relocate(path)
+            changed = changed or path ~= target
+            for _, rule in ipairs(rules) do
+                if target == rule[2] then
+                    changed = changed or spec.order ~= rule[3] or (rule[4] and spec.title ~= rule[4])
+                    spec.order = rule[3]
+                    if rule[4] then
+                        spec.title = rule[4]
+                    end
+                    if path ~= target then
+                        add_alias(path, target)
+                    end
+                end
+            end
+            if path == "admin/nas" then
+                changed = changed or spec.title ~= "网络存储" or spec.order ~= 40
+                spec.title = "网络存储"
+                spec.order = 40
+            elseif path == "admin/vpn" then
+                changed = changed or spec.title ~= "代理" or spec.order ~= 50
+                spec.title = "代理"
+                spec.order = 50
+            end
+            local action = spec.action
+            if action and (action.type == "alias" or action.type == "rewrite") and action.path then
+                changed = changed or action.path ~= relocate(action.path)
+                action.path = relocate(action.path)
+            end
+            result[target] = spec
+        end
+        if changed then
+            assert(fs.writefile(file, json.stringify(result, true) .. "\n"))
+        end
+    end
+end
+
+-- 旧式 Lua 插件仍使用自身的页面、翻译和接口，仅调整菜单入口。
+local function update_controller(name, adjustment)
+    local file = controller_dir .. name .. ".lua"
+    local source = fs.readfile(file)
+    if not source then
+        return
+    end
+    local marker = "-- 自定义菜单排序。"
+    if not source:find(marker, 1, true) then
+        source = source:gsub("%s+$", "") .. "\n\n" .. marker .. [[
+
+local custom_menu_index = index
+function index()
+    setfenv(custom_menu_index, getfenv(1))()
+]] .. adjustment .. "\nend\n"
+    end
+    assert(fs.writefile(file, source))
+end
+
+update_controller("vsftpd", [[    node("admin", "nas").title = "网络存储"
+    node("admin", "nas").order = 40
+    node("admin", "nas", "vsftpd").order = 60]])
+
+-- 中文分类复用 Argon 原有图标和颜色，避免标题变化后显示默认图标。
+local css_file = "/www/luci-static/argon/css/cascade.css"
+local css = fs.readfile(css_file)
+if css then
+    local titles = { { "NAS", "网络存储" }, { "VPN", "代理" } }
+    local patched = css:gsub("([^{}]+)(%b{})", function(selector, declarations)
+        for _, title in ipairs(titles) do
+            local pattern = '%[data%-title%s*=%s*["\']?' .. title[1] .. '["\']?%s*%]'
+            if not selector:find(title[2], 1, true) then
+                local alias, count = selector:gsub(pattern, '[data-title="' .. title[2] .. '"]')
+                if count > 0 then
+                    selector = selector .. ",\n" .. alias
+                end
+            end
+        end
+        return selector .. declarations
+    end)
+    if patched ~= css then
+        assert(fs.writefile(css_file, patched))
+    end
+end
+
+for file in fs.glob("/tmp/luci-indexcache*") do
+    fs.unlink(file)
+end
+for file in fs.glob("/tmp/luci-modulecache/*") do
+    fs.unlink(file)
+end
+LUA

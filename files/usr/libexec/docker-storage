@@ -1,0 +1,83 @@
+#!/bin/sh
+
+backing=/overlay
+source_dir=/overlay/docker
+target=/opt/docker
+
+fail() {
+    logger -t docker-storage "$*"
+    printf '%s\n' "docker-storage: $*" >&2
+    exit 1
+}
+
+# 返回精确挂载点的设备号、文件系统内路径、类型和挂载选项。
+mount_info() {
+    awk -v path="$1" '
+        $5 == path {
+            for (i = 7; i <= NF; i++) {
+                if ($i == "-") {
+                    info = $3 " " $4 " " $(i + 1) " " $6
+                    break
+                }
+            }
+        }
+        END { if (info != "") print info }
+    ' /proc/self/mountinfo
+}
+
+[ "$(uci -q get dockerd.globals.data_root)" = "$target" ] ||
+    fail 'Docker 数据目录必须为 /opt/docker'
+[ "$(uci -q get dockerd.globals.storage_driver)" = overlay2 ] ||
+    fail 'Docker 存储驱动必须为 overlay2，避免启用独立的 containerd 镜像存储'
+[ -z "$(uci -q get dockerd.globals.alt_config_file)" ] ||
+    fail '请使用 dockerd 的 UCI 配置，外部 daemon.json 会绕过存储设置'
+
+# 未挂载时停止，避免把数据写入 2G 系统分区。
+set -- $(mount_info "$backing")
+[ "$#" = 4 ] && [ "$3" = ext4 ] ||
+    fail '/overlay 尚未挂载 ext4 分区，请先完成外部 overlay 挂载并重启'
+case ",$4," in
+    *,rw,*) ;;
+    *) fail '/overlay 为只读，拒绝启动 Docker' ;;
+esac
+expected="$1 ${2%/}/docker ext4 rw"
+
+for path in /opt "$target" "$source_dir"; do
+    [ ! -L "$path" ] || fail "$path 不能是符号链接"
+done
+
+mounted=$(mount_info "$target")
+if [ -n "$mounted" ]; then
+    set -- $mounted
+    case ",$4," in
+        *,rw,*) [ "$1 $2 $3 rw" = "$expected" ] && exit 0 ;;
+    esac
+    fail '/opt/docker 已挂载到其他位置或为只读，拒绝覆盖'
+fi
+
+# 不能在运行中的 Docker 下切换数据挂载。
+if pidof dockerd >/dev/null 2>&1; then
+    fail 'dockerd 已在运行但 /opt/docker 未正确绑定，请先停止 Docker 再重试'
+fi
+
+# 不遮盖已有数据，也不改动运行中容器的子挂载。
+awk -v path="$target/" 'index($5, path) == 1 { found = 1 } END { exit !found }' \
+    /proc/self/mountinfo && fail '/opt/docker 存在子挂载，拒绝重新绑定'
+for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+        fail '/opt/docker 已有旧数据；此镜像的自动初始化仅适用于空数据目录'
+    fi
+done
+
+[ -z "$(mount_info "$source_dir")" ] || fail '/overlay/docker 存在额外挂载'
+mkdir -p "$source_dir" "$target" || fail '无法创建 Docker 数据目录'
+chmod 0710 "$source_dir" || fail '无法设置 Docker 数据目录权限'
+mount -o bind "$source_dir" "$target" || fail '绑定 /opt/docker 失败'
+
+set -- $(mount_info "$target")
+[ "$#" = 4 ] && [ "$1 $2 $3 rw" = "$expected" ] ||
+    fail '绑定后的设备或文件系统不符合预期'
+case ",$4," in
+    *,rw,*) ;;
+    *) fail '绑定后的 Docker 数据目录不可写' ;;
+esac

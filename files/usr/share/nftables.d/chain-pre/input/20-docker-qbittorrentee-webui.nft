@@ -1,0 +1,1 @@
+iifname { "docker0", "br-*" } tcp dport 8080 counter accept comment "!fw4: qBittorrent Enhanced Edition WebUI from Docker"

@@ -1,0 +1,28 @@
+#!/bin/sh
+# 每次启动 Docker 前确认数据目录直通外部 ext4 分区。
+
+init=/etc/init.d/dockerd
+hook='    /usr/libexec/docker-storage || return 1'
+
+if ! grep -qxF "$hook" "$init"; then
+    if [ "$(grep -cx 'start_service() {' "$init")" != 1 ]; then
+        logger -t docker-storage '无法安装存储检查：dockerd 启动脚本格式不兼容'
+        exit 1
+    fi
+    sed -i '/^start_service() {$/a\    /usr/libexec/docker-storage || return 1' "$init" || exit 1
+fi
+
+# 明确使用 overlay2，镜像、容器和命名卷统一保存在 data_root。
+uci set dockerd.globals.data_root='/opt/docker' || exit 1
+uci set dockerd.globals.storage_driver='overlay2' || exit 1
+uci commit dockerd || exit 1
+
+# 兼容保留旧配置的升级，避免旧服务抢先使用 /etc/docker/daemon.json。
+if [ -x /etc/init.d/docker ]; then
+    /etc/init.d/docker disable || exit 1
+fi
+
+# 先准备挂载；即使用户禁用 dockerd，也能安全放置 Compose 项目。
+/etc/init.d/docker-storage enable || exit 1
+
+exit 0

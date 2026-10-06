@@ -1,0 +1,23 @@
+{
+    "luci-app-qbittorrentee": {
+        "description": "Update the qBittorrent Enhanced Edition core",
+        "read": {
+            "ubus": {
+                "file": ["exec"]
+            },
+            "file": {
+                "/usr/libexec/qbittorrentee-update version": ["exec"],
+                "/usr/libexec/qbittorrentee-update status": ["exec"],
+                "/usr/libexec/qbittorrentee-update log": ["exec"]
+            }
+        },
+        "write": {
+            "ubus": {
+                "file": ["exec"]
+            },
+            "file": {
+                "/usr/libexec/qbittorrentee-update start": ["exec"]
+            }
+        }
+    }
+}

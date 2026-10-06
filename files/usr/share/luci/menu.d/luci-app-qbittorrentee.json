@@ -1,0 +1,13 @@
+{
+    "admin/services/qbittorrent/update": {
+        "title": "更新",
+        "order": 30,
+        "action": {
+            "type": "view",
+            "path": "qbittorrentee/update"
+        },
+        "depends": {
+            "acl": ["luci-app-qbittorrentee"]
+        }
+    }
+}

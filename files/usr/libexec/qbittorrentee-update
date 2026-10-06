@@ -1,0 +1,188 @@
+#!/bin/sh
+set -e
+
+BIN=/usr/bin/qbittorrent-nox
+SERVICE=/etc/init.d/qbittorrent
+STATE=/tmp/qbittorrentee-enhanced-status.json
+LOCK=/tmp/qbittorrentee-update.lock
+LOG=/tmp/qbittorrentee-update.log
+REPO=https://github.com/c0re100/qBittorrent-Enhanced-Edition
+API=https://api.github.com/repos/c0re100/qBittorrent-Enhanced-Edition/releases/latest
+ASSET=qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip
+
+# shellcheck source=/dev/null
+. /usr/share/libubox/jshn.sh
+
+json_status() {
+    json_init
+    json_add_string state "$1"
+    json_add_string message "$2"
+    json_dump
+}
+
+log() {
+    printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
+}
+
+status() {
+    log "$2"
+    json_status "$1" "$2" > "$STATE.new"
+    mv -f "$STATE.new" "$STATE"
+}
+
+task_running() {
+    [ -s "$LOCK/pid" ] || return 1
+    pid=$(cat "$LOCK/pid")
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+fetch() {
+    log "下载：$1"
+    curl -fL --show-error --progress-bar --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time "$3" --speed-limit 1024 --speed-time 30 \
+        -o "$2" "$1"
+}
+
+worker() {
+    work= staged= backup= stopped=0 replaced=0 success=0
+    message='更新失败，请查看日志。'
+
+    cleanup() {
+        trap - EXIT HUP INT TERM
+        set +e
+        if [ "$success" -ne 1 ]; then
+            if [ "$replaced" -eq 1 ]; then
+                "$SERVICE" stop || true
+                if mv -f "$backup" "$BIN"; then
+                    message="$message 已回滚原版本。"
+                else
+                    message="回滚失败，原版本保存在 $backup，请手动恢复。"
+                fi
+                backup=
+            fi
+            if [ "$stopped" -eq 1 ]; then
+                "$SERVICE" start || message="$message 服务恢复失败，请查看系统日志。"
+            fi
+            status error "$message"
+        fi
+        [ -z "$staged" ] || rm -f "$staged"
+        [ -z "$backup" ] || rm -f "$backup"
+        [ -z "$work" ] || rm -rf "$work"
+        rm -f "$LOCK/pid"
+        rmdir "$LOCK"
+    }
+
+    trap cleanup EXIT
+    trap 'exit 1' HUP INT TERM
+    # 由后台任务自己登记进程，避免任务结束后启动方又写入过期 PID。
+    printf '%s\n' "$$" > "$LOCK/pid"
+    [ "$(uname -m)" = x86_64 ] || { message='仅支持 x86_64。'; exit 1; }
+    work=$(mktemp -d /tmp/qbittorrentee-enhanced.XXXXXX)
+    message='查询版本失败，当前版本未修改，请查看日志。'
+    status checking '正在查询最新稳定版...'
+    fetch "$API" "$work/release.json" 30
+    tag=$(jsonfilter -i "$work/release.json" -e '@.tag_name')
+    printf '%s\n' "$tag" | grep -Eq '^release-[0-9]+(\.[0-9]+)+$'
+    [ "$(jsonfilter -i "$work/release.json" -e '@.prerelease')" = false ]
+    [ "$(jsonfilter -i "$work/release.json" -e '@.draft')" = false ]
+    url=$(jsonfilter -i "$work/release.json" -e "@.assets[@.name=\"$ASSET\"].browser_download_url")
+    [ "$url" = "$REPO/releases/download/$tag/$ASSET" ]
+    current=$("$BIN" --version 2>/dev/null || true)
+    log "当前版本：$current；最新版本：v${tag#release-}。"
+    if [ "$current" = "qBittorrent v${tag#release-}" ]; then
+        status done "已是最新稳定版 v${tag#release-}。"
+        success=1
+        return
+    fi
+
+    message='下载失败，当前版本未修改，请查看日志。'
+    status downloading "正在下载 v${tag#release-} ..."
+    fetch "$url" "$work/release.zip" 300
+    message='版本检查失败，当前版本未修改，请查看日志。'
+    status verifying '正在检查版本...'
+    unzip -p "$work/release.zip" qbittorrent-nox > "$work/qbittorrent-nox"
+    chmod 0755 "$work/qbittorrent-nox"
+    version=$("$work/qbittorrent-nox" --version)
+    [ "$version" = "qBittorrent v${tag#release-}" ]
+
+    # 在目标文件系统准备新版本和备份，再停止服务。
+    message='安装失败，请查看日志。'
+    staged=$(mktemp /usr/bin/.qbittorrentee-enhanced.XXXXXX)
+    cp "$work/qbittorrent-nox" "$staged"
+    chmod 0755 "$staged"
+    backup=$(mktemp /usr/bin/.qbittorrentee-backup.XXXXXX)
+    cp -p "$BIN" "$backup"
+    status installing '正在替换版本并恢复服务...'
+    if "$SERVICE" running; then
+        stopped=1
+        "$SERVICE" stop
+    fi
+    # 提前记录替换状态，确保 mv 后收到中断信号时仍能回滚。
+    replaced=1
+    mv -f "$staged" "$BIN"
+    staged=
+    if [ "$stopped" -eq 1 ]; then
+        message='新版服务启动失败。'
+        "$SERVICE" start
+        sleep 5
+        "$SERVICE" running
+    fi
+    status done "已更新至 v${tag#release-}。"
+    success=1
+}
+
+case "${1:-}" in
+    version)
+        "$BIN" --version
+        ;;
+    status)
+        if [ -f "$STATE" ]; then
+            case "$(jsonfilter -i "$STATE" -e '@.state')" in
+                starting | checking | downloading | verifying | installing)
+                    if [ ! -d "$LOCK" ] || { [ -s "$LOCK/pid" ] && ! task_running; }; then
+                        json_status error '更新任务已退出，请查看日志后重试。'
+                        exit 0
+                    fi
+                    ;;
+            esac
+            cat "$STATE"
+        else
+            json_status idle '可更新至最新稳定版。'
+        fi
+        ;;
+    log)
+        if [ -f "$LOG" ]; then
+            tail -c 16384 "$LOG"
+        else
+            printf '%s\n' '暂无更新日志。'
+        fi
+        ;;
+    start)
+        umask 022
+        # 仅清理由已退出任务遗留的锁；旧版无进程记录的锁保留。
+        if [ -s "$LOCK/pid" ] && ! task_running && mkdir "$LOCK/recover" 2>/dev/null; then
+            if [ -s "$LOCK/pid" ] && ! task_running; then
+                rm -f "$LOCK/pid"
+                rmdir "$LOCK/recover"
+                rmdir "$LOCK"
+            else
+                rmdir "$LOCK/recover"
+            fi
+        fi
+        if ! mkdir "$LOCK" 2>/dev/null; then
+            echo '已有更新任务；若无法重试，请查看日志或重启路由器。' >&2
+            exit 1
+        fi
+        : > "$LOG"
+        status starting '更新任务已启动。' >> "$LOG"
+        "$0" worker >> "$LOG" 2>&1 < /dev/null &
+        ;;
+    worker)
+        worker
+        ;;
+    *)
+        echo 'Usage: qbittorrentee-update {version|status|log|start}' >&2
+        exit 1
+        ;;
+esac

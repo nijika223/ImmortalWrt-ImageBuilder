@@ -1,0 +1,32 @@
+#!/bin/sh
+# 首次启动时配置网络、时区、LuCI 主题及默认 Shell。
+
+uci batch <<'EOF'
+set network.lan.proto='static'
+set network.lan.ipaddr='192.168.10.1'
+set network.lan.netmask='255.255.255.0'
+
+set system.@system[0].zonename='Asia/Shanghai'
+set system.@system[0].timezone='CST-8'
+
+set luci.main.lang='zh_cn'
+set luci.main.mediaurlbase='/luci-static/argon'
+
+set argon.@global[0].primary='#5575ad'
+set argon.@global[0].dark_primary='#483d8b'
+set argon.@global[0].blur='10'
+set argon.@global[0].blur_dark='10'
+set argon.@global[0].transparency='0.5'
+set argon.@global[0].transparency_dark='0.5'
+set argon.@global[0].mode='normal'
+set argon.@global[0].online_wallpaper='none'
+
+commit network
+commit system
+commit luci
+commit argon
+EOF
+
+sed -i '/^root:/s|:[^:]*$|:/usr/bin/zsh|' /etc/passwd
+
+exit 0
