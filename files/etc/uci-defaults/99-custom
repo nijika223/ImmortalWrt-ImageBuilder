@@ -1,5 +1,4 @@
 #!/bin/sh
-# 首次启动时配置网络、时区、LuCI 主题及默认 Shell。
 
 uci batch <<'EOF'
 set network.lan.proto='static'

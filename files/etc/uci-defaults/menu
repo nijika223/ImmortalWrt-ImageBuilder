@@ -1,5 +1,5 @@
 #!/bin/sh
-# 整理已安装插件的菜单，保留默认名称、权限和旧链接。
+
 /usr/bin/lua <<'LUA'
 local fs = require("nixio.fs")
 local json = require("luci.jsonc")

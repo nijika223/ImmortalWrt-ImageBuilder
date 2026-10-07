@@ -10,7 +10,6 @@ fail() {
     exit 1
 }
 
-# 返回精确挂载点的设备号、文件系统内路径、类型和挂载选项。
 mount_info() {
     awk -v path="$1" '
         $5 == path {
@@ -32,7 +31,6 @@ mount_info() {
 [ -z "$(uci -q get dockerd.globals.alt_config_file)" ] ||
     fail '请使用 dockerd 的 UCI 配置，外部 daemon.json 会绕过存储设置'
 
-# 未挂载时停止，避免把数据写入 2G 系统分区。
 set -- $(mount_info "$backing")
 [ "$#" = 4 ] && [ "$3" = ext4 ] ||
     fail '/overlay 尚未挂载 ext4 分区，请先完成外部 overlay 挂载并重启'
@@ -55,12 +53,10 @@ if [ -n "$mounted" ]; then
     fail '/opt/docker 已挂载到其他位置或为只读，拒绝覆盖'
 fi
 
-# 不能在运行中的 Docker 下切换数据挂载。
 if pidof dockerd >/dev/null 2>&1; then
     fail 'dockerd 已在运行但 /opt/docker 未正确绑定，请先停止 Docker 再重试'
 fi
 
-# 不遮盖已有数据，也不改动运行中容器的子挂载。
 awk -v path="$target/" 'index($5, path) == 1 { found = 1 } END { exit !found }' \
     /proc/self/mountinfo && fail '/opt/docker 存在子挂载，拒绝重新绑定'
 for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do

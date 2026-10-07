@@ -75,6 +75,7 @@ worker() {
 
     trap cleanup EXIT
     trap 'exit 1' HUP INT TERM
+
     # 由后台任务自己登记进程，避免任务结束后启动方又写入过期 PID。
     printf '%s\n' "$$" > "$LOCK/pid"
     [ "$(uname -m)" = x86_64 ] || { message='仅支持 x86_64。'; exit 1; }
@@ -118,6 +119,7 @@ worker() {
         stopped=1
         "$SERVICE" stop
     fi
+
     # 提前记录替换状态，确保 mv 后收到中断信号时仍能回滚。
     replaced=1
     mv -f "$staged" "$BIN"

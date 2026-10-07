@@ -1,5 +1,4 @@
 #!/bin/sh /etc/rc.common
-# 先准备持久化目录，再允许用户或 dockerd 写入。
 
 START=95
 
