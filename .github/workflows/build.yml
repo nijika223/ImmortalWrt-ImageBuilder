@@ -27,7 +27,7 @@ on:
           - 'true'
           - 'false'
       release_version:
-        description: Release 版本号
+        description: 指定 Release 版本号，留空自动生成
         type: string
         required: false
         default: ''
