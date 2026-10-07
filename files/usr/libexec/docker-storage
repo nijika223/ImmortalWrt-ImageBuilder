@@ -11,8 +11,10 @@ fail() {
 }
 
 mount_info() {
-    awk -v path="$1" '
-        $5 == path {
+    awk -v path="$1" -v containing="${2:-}" '
+        ($5 == path || (containing && ($5 == "/" || index(path, $5 "/") == 1))) &&
+            length($5) >= longest {
+            longest = length($5)
             for (i = 7; i <= NF; i++) {
                 if ($i == "-") {
                     info = $3 " " $4 " " $(i + 1) " " $6
@@ -31,18 +33,35 @@ mount_info() {
 [ -z "$(uci -q get dockerd.globals.alt_config_file)" ] ||
     fail '请使用 dockerd 的 UCI 配置，外部 daemon.json 会绕过存储设置'
 
-set -- $(mount_info "$backing")
+for path in /opt "$target" "$source_dir"; do
+    [ ! -L "$path" ] || fail "$path 不能是符号链接"
+done
+
+backing_info=$(mount_info "$backing")
+if [ -z "$backing_info" ]; then
+    set -- $(mount_info "$target" containing)
+    [ "$#" = 4 ] && [ "$3" = ext4 ] ||
+        fail '/overlay 未挂载，/opt/docker 必须位于 ext4 文件系统；请使用 ext4 镜像或挂载 ext4 数据分区'
+    case ",$4," in
+        *,rw,*) ;;
+        *) fail '/opt/docker 所在文件系统为只读，拒绝启动 Docker' ;;
+    esac
+    if [ ! -d "$target" ]; then
+        mkdir -p "$target" || fail '无法创建 Docker 数据目录'
+        chmod 0710 "$target" || fail '无法设置 Docker 数据目录权限'
+    fi
+    [ -w "$target" ] || fail '/opt/docker 不可写，拒绝启动 Docker'
+    exit 0
+fi
+
+set -- $backing_info
 [ "$#" = 4 ] && [ "$3" = ext4 ] ||
-    fail '/overlay 尚未挂载 ext4 分区，请先完成外部 overlay 挂载并重启'
+    fail '/overlay 必须挂载 ext4 分区'
 case ",$4," in
     *,rw,*) ;;
     *) fail '/overlay 为只读，拒绝启动 Docker' ;;
 esac
 expected="$1 ${2%/}/docker ext4 rw"
-
-for path in /opt "$target" "$source_dir"; do
-    [ ! -L "$path" ] || fail "$path 不能是符号链接"
-done
 
 mounted=$(mount_info "$target")
 if [ -n "$mounted" ]; then

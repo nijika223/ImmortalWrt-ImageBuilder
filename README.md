@@ -10,4 +10,4 @@
 - **中文界面**：预装 Argon 主题及中文界面，调整 LuCI 菜单分类、服务排序。
 - **代理与组网**：预装 Nikki，构建时将内核替换为最新稳定版 Mihomo 内核。
 - **下载与文件服务**：将 qBittorrent 替换为 qBittorrent Enhanced Edition，并新增 LuCI 在线更新页面。
-- **Docker 支持**：预装 Dockerman 和 Docker Compose；使用 `overlay2`，将 `/overlay/docker` 绑定至 `/opt/docker`，启动前检查挂载和存储配置，并配置 LAN 访问容器发布端口的防火墙规则。
+- **Docker 支持**：预装 Dockerman 和 Docker Compose；挂载 ext4 的 `/overlay` 时将 `/overlay/docker` 绑定至 `/opt/docker`；未挂载时直接使用位于可写 ext4 文件系统上的 `/opt/docker`，启动前检查挂载和存储配置，并配置 LAN 访问容器发布端口的防火墙规则。
