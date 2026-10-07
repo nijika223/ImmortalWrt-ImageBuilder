@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 指定版本，留空选择默认值
+        description: 指定 ImmortalWrt 版本，留空选择默认值
         type: string
         required: false
         default: ''
@@ -20,15 +20,23 @@ on:
         type: string
         default: '2000'
       release:
-        description: 同时发布到 GitHub Release
-        type: boolean
-        default: false
+        description: 将编译出的镜像上传到 Release
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      release_version:
+        description: Release 版本号，留空自动编号（all 与 EFI 共用 r 编号）
+        type: string
+        required: false
+        default: '25.12.0-r1'
 
 permissions:
   contents: read
 
 concurrency:
-  group: firmware-${{ github.ref }}
+  group: firmware-build
   cancel-in-progress: false
 
 jobs:
@@ -107,15 +115,35 @@ jobs:
           retention-days: 14
 
       - name: Publish release
-        if: inputs.release
+        if: inputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
-          tag="immortalwrt-${VERSION}-${IMAGE_MODE}-${RUN_NUMBER}-${RUN_ATTEMPT}"
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            tag="$RELEASE_VERSION"
+          else
+            revision=$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/${VERSION}-" --jq '.[].ref' |
+              awk -v prefix="refs/tags/${VERSION}-" '
+                BEGIN { max = 0 }
+                index($0, prefix) == 1 {
+                  value = substr($0, length(prefix) + 1)
+                  if (value ~ /^(efi-)?r[0-9]+$/) {
+                    sub(/^(efi-)?r/, "", value)
+                    if (value + 0 > max) max = value + 0
+                  }
+                }
+                END { printf "%.0f\n", max + 1 }
+              ')
+            if [[ "$IMAGE_MODE" = ext4-efi ]]; then
+              tag="${VERSION}-efi-r${revision}"
+            else
+              tag="${VERSION}-r${revision}"
+            fi
+          fi
+          git check-ref-format "refs/tags/$tag"
           gh release create "$tag" "$BUILDER_DIR/bin/targets/x86/64/"* \
-            --target "$COMMIT_SHA" --title "ImmortalWrt ${VERSION} ${IMAGE_MODE}" \
-            --notes "x86/64 generic, RootFS ${ROOTFS_SIZE} MiB"
+            --target "$COMMIT_SHA" --title "ImmortalWrt ${tag} ${IMAGE_MODE}" \
+            --notes "ImmortalWrt ${VERSION}, x86/64 generic, RootFS ${ROOTFS_SIZE} MiB"
